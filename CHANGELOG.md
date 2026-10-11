@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Independent styling per language, via ASS output.** The merged subtitle is now served as an Advanced SubStation Alpha file (`/subs/....ass`, `text/x-ass`), rendered by Stremio's libass renderer. The primary language stays white at full size on the top line; the secondary language sits directly below it, smaller and in a soft yellow. Both lines are emitted as a *single* `Dialogue` event joined by `\N`, so the line order is fixed, there is one bottom margin to respect, and lines can neither overlap nor be clipped. New module: `lib/assRenderer.js`.
+- Style is tunable without code changes via `DUAL_SUB_FONT`, `DUAL_SUB_MAIN_SIZE`, `DUAL_SUB_MAIN_COLOR`, `DUAL_SUB_TRANS_SIZE`, `DUAL_SUB_TRANS_COLOR_ASS`, `DUAL_SUB_OUTLINE_COLOR`, `DUAL_SUB_OUTLINE`, `DUAL_SUB_MARGIN_V` and `DUAL_SUB_MARGIN_H`. Sizes are relative to a 1920×1080 reference that libass scales to the real screen, so one setting holds across devices, movies and episodes.
+- `DUAL_SUB_FORMAT=srt` restores the previous plain-SRT output. The `.srt` route and its rendering are unchanged and still served.
+
+### Fixed
+
+- Documented that the previous SRT styling never actually reached the screen. `stremio-video`'s SRT→VTT converter strips every HTML tag before rendering (`caption.replace(/<[a-zA-Z/][^>]*>/g, '')`), so the `<b>`, `<i>` and `<font color>` emitted for the dual lines were discarded by every current Stremio client — only the `›` marker survived. README.md and ARCHITECTURE.md claimed this worked "where supported"; they now describe the verified behaviour.
+
+### Known limitations
+
+- ASS styling requires **Settings → Player → ASS subtitles styling** to be enabled in Stremio; it defaults to off (`ass_subtitles_styling: false` in stremio-core). While it is off, Stremio converts the ASS to VTT and drops the override tags: both languages remain readable on two lines, but without the colour and size difference.
+- Chromecast and external players receive the subtitle URL directly, so styling there depends on their own renderer.
+
 ### Performance
 
 - Halved Vercel Active CPU per dual-subtitle request. The previous flow ran the entire fetch + parse + merge pipeline twice — once in `subtitlesHandler` (whose result was thrown away after extracting a URL) and once in `generateDynamicSubtitle`. `subtitlesHandler` now only fetches the OpenSubtitles list and picks the top-ranked candidate pair via metadata; all heavy work happens once, on demand, when Stremio fetches the `.srt` URL.

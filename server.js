@@ -297,10 +297,22 @@ app.get('/subtitles/:filename', (req, res) => {
   res.send(content);
 });
 
+// Per-format response headers for the dynamic subtitle route.
+//
+// `text/x-ass` is one of the MIME types stremio-video's subtitleTypes.js
+// recognises, so the track is routed to the libass renderer even before the
+// `.ass` URL extension is inspected.
+const SUB_FORMAT_HEADERS = {
+  ass: { contentType: 'text/x-ass; charset=utf-8', ext: 'ass' },
+  srt: { contentType: 'text/srt; charset=utf-8', ext: 'srt' }
+};
+
 // Dynamic subtitle generation (serverless-compatible)
-// URL format: /subs/:type/:imdbId/:season/:episode/:mainLang/:transLang/:mainSubId/:transSubId.srt
-app.get('/subs/:type/:imdbId/:season/:episode/:mainLang/:transLang/:mainSubId/:transSubId.srt', async (req, res) => {
+// URL format: /subs/:type/:imdbId/:season/:episode/:mainLang/:transLang/:mainSubId/:transSubId.(ass|srt)
+app.get('/subs/:type/:imdbId/:season/:episode/:mainLang/:transLang/:mainSubId/:transSubId.:format(ass|srt)', async (req, res) => {
   const { type, imdbId, season, episode, mainLang, transLang, mainSubId, transSubId } = req.params;
+  const format = req.params.format === 'srt' ? 'srt' : 'ass';
+  const { contentType, ext } = SUB_FORMAT_HEADERS[format];
 
   // Optional video matching params (forwarded as query-string by the
   // subtitles handler). These help OpenSubtitles pick the right
@@ -311,27 +323,27 @@ app.get('/subs/:type/:imdbId/:season/:episode/:mainLang/:transLang/:mainSubId/:t
     videoHash: req.query && req.query.videoHash ? req.query.videoHash : undefined
   };
   
-  debugServer.log(`Dynamic subtitle request: ${type}/${imdbId} ${mainLang}+${transLang}`);
-  
+  debugServer.log(`Dynamic subtitle request: ${type}/${imdbId} ${mainLang}+${transLang} (${format})`);
+
   try {
     const content = await generateDynamicSubtitle(
-      type, imdbId, season, episode, mainLang, transLang, mainSubId, transSubId, videoParams
+      type, imdbId, season, episode, mainLang, transLang, mainSubId, transSubId, videoParams, format
     );
-    
+
     if (!content) {
       debugServer.warn('Could not generate dynamic subtitle');
       return res.status(404).send('Subtitle generation failed');
     }
-    
+
     trackSubtitleServed();
 
-    res.setHeader('Content-Type', 'text/srt; charset=utf-8');
+    res.setHeader('Content-Type', contentType);
     // s-maxage tells Vercel's edge to cache for 6h; stale-while-revalidate
     // lets a stale copy serve while we regenerate in the background.
     // The function only runs again every 6h per (URL, edge node), which
     // is the single biggest Active CPU saving on this addon.
     res.setHeader('Cache-Control', 'public, max-age=3600, s-maxage=21600, stale-while-revalidate=86400');
-    res.setHeader('Content-Disposition', `inline; filename="dual_${mainLang}_${transLang}.srt"`);
+    res.setHeader('Content-Disposition', `inline; filename="dual_${mainLang}_${transLang}.${ext}"`);
     res.send(content);
   } catch (error) {
     debugServer.error('Dynamic subtitle error:', error.message);

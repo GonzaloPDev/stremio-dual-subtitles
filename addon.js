@@ -124,6 +124,16 @@ const {
 } = require('./languages');
 const { alignAndMatch } = require('./lib/syncEngine');
 const { generateCandidatePairs } = require('./lib/sourceSelection');
+const { formatAss } = require('./lib/assRenderer');
+
+// Output format for the merged subtitle.
+//
+// ASS is the default because it is the only format whose per-language colour
+// and font size actually survive Stremio's renderer: the SRT path in
+// stremio-video strips every HTML tag before display, so `<b>`/`<font>` in an
+// SRT are decoration that never arrives. Set DUAL_SUB_FORMAT=srt to go back to
+// the plain SRT output.
+const SUB_FORMAT = process.env.DUAL_SUB_FORMAT === 'srt' ? 'srt' : 'ass';
 
 // Optional video-matching parameters (forwarded from Stremio extras).
 // These help OpenSubtitles pick the right release variant for the exact
@@ -563,6 +573,10 @@ function mergeSubtitles(mainSubs, transSubs, options = {}) {
     if (!cleanMainText) continue;
 
     let mergedText;
+    // Hoisted out of the block below so the ASS renderer can reuse it. Both
+    // this and `cleanMainText` are already sanitized (allowedTags: []) and
+    // line-joined, i.e. plain text with no markup of any kind.
+    let cleanTransText = '';
     const transIdxs = matches.get(mi);
     if (transIdxs && transIdxs.length > 0) {
       const transParts = [];
@@ -576,7 +590,7 @@ function mergeSubtitles(mainSubs, transSubs, options = {}) {
         if (piece) transParts.push(piece);
       }
       if (transParts.length > 0) {
-        const cleanTransText = transParts.join(transJoiner);
+        cleanTransText = transParts.join(transJoiner);
         const encMain = htmlEncodeSrt(cleanMainText);
         const encTrans = htmlEncodeSrt(cleanTransText);
         mergedText =
@@ -594,7 +608,15 @@ function mergeSubtitles(mainSubs, transSubs, options = {}) {
       id: mainSub.id,
       startTime: mainSub.startTime,
       endTime: mainSub.endTime,
-      text: mergedText
+      // SRT rendering, with the inline HTML-ish markup. Unchanged.
+      text: mergedText,
+      // Plain per-language text + millisecond timings, for renderers that do
+      // their own styling (see lib/assRenderer.js). Carried alongside `text`
+      // rather than replacing it so the SRT path stays byte-identical.
+      mainText: cleanMainText,
+      transText: cleanTransText || null,
+      startMs: mainSub.startMs,
+      endMs: mainSub.endMs
     });
   }
 
@@ -630,6 +652,21 @@ function formatSrt(subtitleArray) {
     debugServer.error('Error formatting SRT:', sanitizeForLogging(error.message));
     return null;
   }
+}
+
+/**
+ * Serialize merged cues in the requested format.
+ */
+function formatMerged(subtitleArray, format) {
+  if (format === 'ass') {
+    try {
+      return formatAss(subtitleArray);
+    } catch (error) {
+      debugServer.error('Error formatting ASS:', sanitizeForLogging(error.message));
+      return null;
+    }
+  }
+  return formatSrt(subtitleArray);
 }
 
 // In-memory cache for merged subtitles
@@ -683,13 +720,15 @@ function getSubtitle(key) {
  * @param {Array} candidatePairs    output of generateCandidatePairs
  * @param {string} mainLang
  * @param {string} transLang
+ * @param {string} [format='ass']  'ass' or 'srt' — only affects serialization,
+ *                                 never the alignment or the pair choice.
  * @returns {Promise<{
- *   merged: Array, mergedSrt: string, matchRate: number,
+ *   merged: Array, mergedText: string, matchRate: number,
  *   mainSub: object, transSub: object, attempts: number,
  *   passedGate: boolean
  * } | null>}
  */
-async function selectAndMergeBestPair(candidatePairs, mainLang, transLang) {
+async function selectAndMergeBestPair(candidatePairs, mainLang, transLang, format = SUB_FORMAT) {
   if (!Array.isArray(candidatePairs) || candidatePairs.length === 0) return null;
 
   const parsedCache = new Map();
@@ -731,7 +770,7 @@ async function selectAndMergeBestPair(candidatePairs, mainLang, transLang) {
     if (!best || matchRate > best.matchRate) {
       best = {
         merged,
-        mergedSrt: merged && merged.length > 0 ? formatSrt(merged) : null,
+        mergedText: merged && merged.length > 0 ? formatMerged(merged, format) : null,
         matchRate,
         mainSub: pair.main,
         transSub: pair.trans,
@@ -850,7 +889,10 @@ async function subtitlesHandler({ type, id, extra, config }) {
 
     const finalSubtitles = [{
       id: `dual-${best.main.id}-${best.trans.id}`,
-      url: `{{ADDON_URL}}/subs/${dynamicParams}.srt${videoQuery ? `?${videoQuery}` : ''}`,
+      // The `.ass` extension is what makes Stremio route this track to its
+      // libass renderer: stremio-video's subtitleTypes.js matches
+      // /\.(ass|ssa)(?:$|[?#])/i, so the trailing ?videoQuery is harmless.
+      url: `{{ADDON_URL}}/subs/${dynamicParams}.${SUB_FORMAT}${videoQuery ? `?${videoQuery}` : ''}`,
       lang: mainLang,
       SubtitlesName:
         `Dual (${mainLang.toUpperCase()}+${transLang.toUpperCase()}) - ` +
@@ -892,15 +934,18 @@ async function generateDynamicSubtitle(
   transLang,
   mainSubId,
   transSubId,
-  videoParams = {}
+  videoParams = {},
+  format = SUB_FORMAT
 ) {
-  debugServer.log('Dynamic subtitle generation:', { type, imdbId, mainLang, transLang });
+  debugServer.log('Dynamic subtitle generation:', { type, imdbId, mainLang, transLang, format });
 
   const videoCacheFragment = serializeVideoParams(videoParams);
+  // `format` is part of the key so an SRT and an ASS render of the same pair
+  // can't collide in the in-instance cache.
   const cacheKey =
     `${imdbId}_${season || ''}_${episode || ''}` +
     `_${mainLang}_${transLang}_${mainSubId}_${transSubId}` +
-    `_${videoCacheFragment || ''}`;
+    `_${videoCacheFragment || ''}_${format}`;
   const cached = getSubtitle(cacheKey);
   if (cached) {
     debugServer.log(`Cache hit (in-instance): ${cacheKey}`);
@@ -960,20 +1005,20 @@ async function generateDynamicSubtitle(
 
     if (orderedPairs.length === 0) return null;
 
-    const best = await selectAndMergeBestPair(orderedPairs, mainLang, transLang);
+    const best = await selectAndMergeBestPair(orderedPairs, mainLang, transLang, format);
     if (!best || !best.merged || best.merged.length === 0) {
       debugServer.warn('No usable merged subtitle from any pair');
       return null;
     }
 
-    const srtContent = best.mergedSrt;
+    const content = best.mergedText;
     debugServer.log(
-      `Generated ${best.merged.length} merged subtitle entries ` +
+      `Generated ${best.merged.length} merged subtitle entries as ${format} ` +
       `(matchRate=${(best.matchRate * 100).toFixed(1)}%, attempts=${best.attempts})`
     );
 
-    if (srtContent) storeSubtitle(cacheKey, srtContent);
-    return srtContent;
+    if (content) storeSubtitle(cacheKey, content);
+    return content;
   } catch (error) {
     debugServer.error('Error generating dynamic subtitle:', sanitizeForLogging(error.message));
     return null;
@@ -987,6 +1032,7 @@ module.exports = {
   subtitleCache,
   subtitlesHandler,
   generateDynamicSubtitle,
+  SUB_FORMAT,
   // Exported for testing
   _test: {
     parseTimeToMs,
@@ -997,6 +1043,7 @@ module.exports = {
     joinSubtitleLines,
     formatSrt,
     formatSrtSimple,
+    formatMerged,
     msToSrtTime
   }
 };

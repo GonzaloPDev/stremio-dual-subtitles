@@ -429,20 +429,18 @@ function generateLandingHTML(manifest, baseUrl, publicStats) {
       margin-bottom: 12px;
     }
     
+    /* Mirrors the ASS styling the addon actually emits: primary at full size
+       in white, secondary smaller and soft yellow. Keep the size ratio here
+       in step with DUAL_SUB_MAIN_SIZE / DUAL_SUB_TRANS_SIZE. */
     .preview-primary {
-      font-size: 16px;
-      font-weight: 700;
+      font-size: 17px;
+      color: #ffffff;
       margin-bottom: 4px;
     }
-    
-    .preview-secondary {
-      font-size: 14px;
-      font-style: italic;
-      color: var(--text-muted);
-    }
 
-    .preview-secondary::before {
-      content: '› ';
+    .preview-secondary {
+      font-size: 13px;
+      color: #ffe9a3;
     }
     
     /* Buttons */

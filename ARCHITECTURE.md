@@ -112,8 +112,9 @@ parseSrt / parseVtt produces cue arrays
 merge step pairs cues whose timestamps overlap (within tolerance)
    |
    v
-renderSrt emits a single SRT with primary as the top line (bold) and
-secondary prefixed with a marker + italic/muted styling when supported
+lib/assRenderer.js emits a single ASS file: primary as the top line in the
+`Dual` style, secondary below it carrying inline size + color overrides
+(set DUAL_SUB_FORMAT=srt to emit the legacy SRT instead)
    |
    v
 response sent with Cache-Control for intermediary caches
@@ -126,11 +127,16 @@ Cues from the two source tracks are paired like this:
 1. Walk the primary cues in time order.
 2. For each primary cue `P`, find all secondary cues `S` whose window
    overlaps `P` (with a small tolerance for sub-second drift).
-3. Emit one output cue spanning `P.start..P.end`, with:
-   - Line 1: `P.text` wrapped in `<b>`.
-   - Line 2: a visible marker (`›`) plus the overlapping `S.text`,
-     wrapped in `<i>` and a muted `<font color>` that players which render
-     SRT-with-HTML pick up.
+3. Emit one output cue spanning `P.start..P.end`. `mergeSubtitles` attaches
+   both the SRT rendering (`text`, with the legacy `<b>` / `<font>` markup)
+   and the plain per-language strings (`mainText`, `transText`) so either
+   formatter can serialize the same merge result:
+   - ASS (default): one `Dialogue` event, `mainText` then `\N` then
+     `{\fs..\c..}` + `transText`. A single event per cue fixes the line
+     order and keeps one bottom margin, so lines cannot overlap or clip.
+   - SRT (`DUAL_SUB_FORMAT=srt`): line 1 in `<b>`, line 2 prefixed with `›`.
+     Note that current Stremio clients strip these tags before display —
+     see the Subtitle styling section of README.md.
 4. Secondary cues that never overlap a primary are emitted on their own as
    secondary-only cues, so meaningful translations are never dropped.
 

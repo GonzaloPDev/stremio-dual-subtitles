@@ -35,7 +35,7 @@ A Stremio addon that displays **two subtitle languages simultaneously** - design
 
 ![Dual Subtitles in Action](public/demo.png)
 
-*Primary language on top in bold, secondary below with a marker and (where the player supports SRT styling) italic and a softer color. Actual appearance depends on the Stremio client.*
+*Primary language on top at full size in white, secondary directly below it in a smaller, soft-yellow line. Requires **Settings → Player → ASS subtitles styling** to be enabled in Stremio — see [Subtitle styling](#subtitle-styling).*
 
 **Live Instance:** [stremio-dual-subtitles.vercel.app](https://stremio-dual-subtitles.vercel.app)
 
@@ -45,7 +45,7 @@ A Stremio addon that displays **two subtitle languages simultaneously** - design
 
 | Feature | Description |
 |---------|-------------|
-| **Dual Display** | Two languages at once - primary line emphasized, second line with a visible marker and softer styling where supported |
+| **Dual Display** | Two languages at once - primary line at full size, second line smaller and in a distinct color, independently styled via ASS |
 | **70+ Languages** | Full OpenSubtitles language support including rare languages |
 | **Smart Sync** | Intelligent time-based subtitle merging algorithm |
 | **Encoding Support** | UTF-8, UTF-16, Windows codepages, ISO-8859 variants |
@@ -157,6 +157,9 @@ cp .env.example .env
 | `ANALYTICS_SECRET` | - | No | Secret key to protect `/stats` endpoint |
 | `DEBUG_MODE` | `false` | No | Enable verbose server logging |
 | `RATE_LIMIT_MAX` | `60` | No | Max requests per IP per minute |
+
+Subtitle appearance (font, per-language size and color, margins, output format)
+is controlled by a separate set of variables — see [Subtitle styling](#subtitle-styling).
 
 ### Network Access Setup
 
@@ -316,8 +319,56 @@ The addon uses a time-based matching algorithm:
 
 1. For each primary subtitle entry, find overlapping secondary entries
 2. Match based on start/end time proximity (within 1 second tolerance)
-3. Combine matched entries: primary line uses `<b>`, secondary line uses a `›` prefix plus `<i>` and a muted `<font color>` when the player renders HTML in SRT
+3. Combine matched entries into one cue: primary on line 1, secondary on line 2 (see [Subtitle styling](#subtitle-styling) for how each line is styled)
 4. Handle edge cases: missing translations, timing gaps
+
+### Subtitle styling
+
+The addon serves **ASS** (Advanced SubStation Alpha), not SRT. This is not a
+cosmetic preference — it is the only format in which per-language color and font
+size actually reach the screen:
+
+- Stremio renders addon subtitles through `stremio-video`'s `withHTMLSubtitles`.
+  Its SRT→VTT converter runs `caption.replace(/<[a-zA-Z/][^>]*>/g, '')`
+  ("remove all html tags for security reasons"), so `<b>`, `<i>` and
+  `<font color>` inside an SRT are **stripped before display**. Styled SRT
+  cannot work, by any encoding.
+- ASS, by contrast, is handed to a real **libass** renderer
+  (`@stremio/libass-wasm`, or mpv's native libass on desktop), which honors
+  per-line font size, color, alignment and margins.
+
+Each cue is a single ASS `Dialogue` event with the two languages joined by `\N`,
+the second one prefixed with inline `{\fs..\c..}` overrides. One event per cue
+keeps the line order fixed, leaves a single bottom margin to respect, and needs
+no collision handling — so lines never overlap or get clipped.
+
+> [!IMPORTANT]
+> **You must enable `Settings → Player → ASS subtitles styling` in Stremio.**
+> It defaults to **off** (`ass_subtitles_styling: false` in stremio-core). While
+> it is off, Stremio converts the ASS to VTT, dropping the override tags: you
+> still get both languages on two readable lines, but with no color or size
+> difference. Chromecast and external players receive the URL directly and
+> render it however they see fit, so styling is not guaranteed there either.
+
+Appearance is tunable with environment variables (no code changes, no
+reinstall — restart the addon and the new style applies to every title):
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `DUAL_SUB_FONT` | `Arial` | Font family for both lines |
+| `DUAL_SUB_MAIN_SIZE` | `54` | Primary line size |
+| `DUAL_SUB_MAIN_COLOR` | `#FFFFFF` | Primary line color |
+| `DUAL_SUB_TRANS_SIZE` | `40` | Secondary line size |
+| `DUAL_SUB_TRANS_COLOR_ASS` | `#FFE9A3` | Secondary line color |
+| `DUAL_SUB_OUTLINE_COLOR` | `#101010` | Text outline color |
+| `DUAL_SUB_OUTLINE` | `2.6` | Outline thickness |
+| `DUAL_SUB_MARGIN_V` | `60` | Distance from the bottom of the frame |
+| `DUAL_SUB_MARGIN_H` | `40` | Left/right margin |
+| `DUAL_SUB_FORMAT` | `ass` | Set to `srt` to serve plain SRT instead |
+
+Sizes are relative to a 1920×1080 reference that libass scales to the real
+screen, so one setting looks the same on a phone and on a 4K TV, and identical
+across movies and episodes.
 
 ### Supported Encodings
 
@@ -350,7 +401,8 @@ The addon uses a time-based matching algorithm:
 |--------|----------|-------------|
 | GET | `/:config/manifest.json` | Configured manifest |
 | GET | `/:config/subtitles/:type/:id.json` | Subtitle list for content |
-| GET | `/subs/:type/:imdbId/:season/:episode/:mainLang/:transLang/:mainSubId/:transSubId.srt` | Generated subtitle file |
+| GET | `/subs/:type/:imdbId/:season/:episode/:mainLang/:transLang/:mainSubId/:transSubId.ass` | Generated subtitle file (styled; this is what the addon publishes) |
+| GET | `/subs/.../:transSubId.srt` | Same merge, serialized as plain SRT |
 
 ### Protected Endpoints
 
@@ -445,6 +497,22 @@ A: Open an issue on [GitHub](https://github.com/ummugulsunn/stremio-dual-subtitl
 4. **Clear Stremio cache**: Settings > Clear Cache in Stremio
 5. **Check language selection**: Ensure you selected two different languages
 
+### Both Languages Show, But Without Different Colors or Sizes
+
+This is the single most common styling question, and it is almost always one
+setting:
+
+1. In Stremio, go to **Settings → Player** and turn **ASS subtitles styling**
+   **on**. It ships **off** by default, and while it is off Stremio converts the
+   ASS file to VTT and discards the per-line color and size.
+2. Restart playback (or reselect the `Dual (...)` track) so the subtitle is
+   reloaded through the libass renderer.
+3. If you are casting to a Chromecast or playing in an external player, the
+   subtitle is rendered by that device, not by Stremio — styling is not
+   guaranteed there.
+4. Confirm the addon is actually serving ASS: the track URL should end in
+   `.ass`. If it ends in `.srt`, `DUAL_SUB_FORMAT` is set to `srt`.
+
 ### Encoding Issues (Garbled Text)
 
 1. The addon auto-detects encoding for most files
@@ -490,6 +558,10 @@ A: Open an issue on [GitHub](https://github.com/ummugulsunn/stremio-dual-subtitl
 - Dependent on OpenSubtitles availability
 - Serverless (Vercel) has 10-second timeout limit
 - In-memory cache doesn't persist across serverless invocations
+- Per-language color and size depend on the playback engine, not the addon. They
+  require **Settings → Player → ASS subtitles styling** to be enabled in Stremio
+  (off by default), and are not guaranteed on Chromecast or external players.
+  See [Subtitle styling](#subtitle-styling).
 
 ---
 

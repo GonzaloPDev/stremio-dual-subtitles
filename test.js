@@ -891,6 +891,323 @@ test('alignAndMatch: piecewise-drifted track matches better with local offsets e
 });
 
 // ============================================================================
+// ASS output (lib/assRenderer.js)
+// ============================================================================
+
+console.log('\n--- ASS renderer ---');
+
+const {
+  ASS_STYLE,
+  formatAss,
+  escapeAssText,
+  hexToAssColor,
+  hexToAssInlineColor,
+  msToAssTime
+} = require('./lib/assRenderer');
+
+// Vendored verbatim from stremio-video's subtitleTypes.js. These are the exact
+// checks Stremio uses to decide a track is ASS, so our output must satisfy them.
+const STREMIO_ASS_SECTION_RE = /^\s*\[(?:Script Info|V4\+? Styles|Events)\]/im;
+const STREMIO_ASS_LINE_RE = /^\s*(?:Format|Dialogue)\s*:/im;
+
+const assCues = [
+  {
+    startTime: '00:00:01,500', endTime: '00:00:04,000',
+    mainText: 'Hola, ¿cómo estás?', transText: 'Hi, how are you?'
+  },
+  {
+    startTime: '00:00:05,000', endTime: '00:00:06,250',
+    mainText: 'Solo español', transText: null
+  }
+];
+
+test('hexToAssColor: #RRGGBB to &H00BBGGRR (style form)', () => {
+  assert.strictEqual(hexToAssColor('#FFE9A3'), '&H00A3E9FF');
+  assert.strictEqual(hexToAssColor('#FFFFFF'), '&H00FFFFFF');
+  assert.strictEqual(hexToAssColor('#000000'), '&H00000000');
+});
+
+test('hexToAssInlineColor: #RRGGBB to &HBBGGRR& (override-tag form)', () => {
+  assert.strictEqual(hexToAssInlineColor('#FFE9A3'), '&HA3E9FF&');
+  assert.strictEqual(hexToAssInlineColor('#FFFFFF'), '&HFFFFFF&');
+});
+
+test('msToAssTime: centiseconds, single-digit hour', () => {
+  assert.strictEqual(msToAssTime(3661500), '1:01:01.50');
+  assert.strictEqual(msToAssTime(0), '0:00:00.00');
+  assert.strictEqual(msToAssTime(1500), '0:00:01.50');
+});
+
+test('escapeAssText: neutralizes braces so no renderer can eat the text', () => {
+  assert.strictEqual(escapeAssText('a {b} c'), 'a (b) c');
+});
+
+test('escapeAssText: drops leftover ASS override tags from the source', () => {
+  assert.strictEqual(escapeAssText('{\\an8}Hola'), 'Hola');
+  assert.strictEqual(escapeAssText('{\\i1}Hola{\\i0} mundo'), 'Hola mundo');
+});
+
+test('escapeAssText: a source backslash cannot inject a line break', () => {
+  // A literal "\N" in the source would otherwise become a hard newline.
+  assert.strictEqual(escapeAssText('before\\Nafter'), 'beforeNafter');
+  assert.strictEqual(escapeAssText('x\\{y'), 'x(y');
+});
+
+test('escapeAssText: real newlines become ASS hard breaks', () => {
+  assert.strictEqual(escapeAssText('one\ntwo'), 'one\\Ntwo');
+});
+
+test('escapeAssText: leaves &, < and > literal (ASS is not HTML)', () => {
+  assert.strictEqual(escapeAssText('Tom & <3 >_<'), 'Tom & <3 >_<');
+});
+
+test('formatAss: output is recognised as ASS by Stremio sniffing', () => {
+  const ass = formatAss(assCues);
+  assert.ok(ass.startsWith('[Script Info]'), 'must start with [Script Info]');
+  assert.ok(STREMIO_ASS_SECTION_RE.test(ass), 'must match isASSContent section regex');
+  assert.ok(STREMIO_ASS_LINE_RE.test(ass), 'must match isASSContent Format/Dialogue regex');
+});
+
+test('formatAss: declares exactly one bottom-anchored style', () => {
+  const ass = formatAss(assCues);
+  const styleLines = ass.split('\n').filter(l => l.startsWith('Style:'));
+  assert.strictEqual(styleLines.length, 1);
+  // ...,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
+  const fields = styleLines[0].replace(/^Style:\s*/, '').split(',');
+  assert.strictEqual(fields[0], 'Dual');
+  assert.strictEqual(fields[2], String(ASS_STYLE.mainSize), 'main font size');
+  assert.strictEqual(fields[3], hexToAssColor(ASS_STYLE.mainColor), 'main colour');
+  assert.strictEqual(fields[18], '2', 'alignment must be bottom-centre');
+  assert.strictEqual(fields[21], String(ASS_STYLE.marginV), 'bottom margin');
+  assert.ok(ass.includes('WrapStyle: 0'), 'wrapped lines must grow upward');
+});
+
+test('formatAss: dual cue is ONE event with \\N and the secondary overrides', () => {
+  const ass = formatAss(assCues);
+  const dialogue = ass.split('\n').filter(l => l.startsWith('Dialogue:'));
+  assert.strictEqual(dialogue.length, 2, 'one event per cue, not one per language');
+
+  const dual = dialogue[0];
+  assert.ok(dual.includes('0:00:01.50,0:00:04.00'), 'timings preserved');
+  // Text is the 10th and last Dialogue field, and may itself contain commas.
+  const body = dual.replace(/^Dialogue:\s*/, '').split(',').slice(9).join(',');
+  const halves = body.split('\\N');
+  assert.strictEqual(halves.length, 2, 'exactly one hard break');
+  assert.strictEqual(halves[0], 'Hola, ¿cómo estás?', 'primary line is unstyled plain text');
+  assert.ok(
+    halves[1].startsWith(`{\\fs${ASS_STYLE.transSize}\\c${hexToAssInlineColor(ASS_STYLE.transColor)}}`),
+    `secondary line must carry size+colour overrides, got: ${halves[1]}`
+  );
+  assert.ok(halves[1].endsWith('Hi, how are you?'));
+});
+
+test('formatAss: primary is larger than secondary and they differ in colour', () => {
+  assert.ok(ASS_STYLE.transSize < ASS_STYLE.mainSize, 'secondary must be smaller');
+  assert.notStrictEqual(ASS_STYLE.transColor, ASS_STYLE.mainColor);
+});
+
+test('formatAss: cue without a translation emits no \\N', () => {
+  const ass = formatAss(assCues);
+  const dialogue = ass.split('\n').filter(l => l.startsWith('Dialogue:'));
+  assert.ok(!dialogue[1].includes('\\N'), 'single-language cue must stay one line');
+  assert.ok(dialogue[1].endsWith('Solo español'));
+});
+
+test('formatAss: skips unusable cues and returns null when nothing is left', () => {
+  assert.strictEqual(formatAss([]), null);
+  assert.strictEqual(formatAss([{ mainText: '', transText: 'x' }]), null);
+  assert.strictEqual(
+    formatAss([{ startMs: 500, endMs: 500, mainText: 'zero length' }]),
+    null,
+    'end <= start must be dropped'
+  );
+  assert.strictEqual(formatAss(null), null);
+});
+
+test('formatAss: prefers startMs/endMs over re-parsing SRT strings', () => {
+  const ass = formatAss([
+    { startMs: 1500, endMs: 4000, startTime: 'bogus', endTime: 'bogus', mainText: 'ok' }
+  ]);
+  assert.ok(ass.includes('0:00:01.50,0:00:04.00'));
+});
+
+test('mergeSubtitles: carries plain mainText/transText for the ASS renderer', () => {
+  const main = [{ id: '1', startTime: '00:00:01,000', endTime: '00:00:03,000', text: 'Hello' }];
+  const trans = [{ id: '1', startTime: '00:00:01,000', endTime: '00:00:03,000', text: 'Hola' }];
+  const merged = mergeSubtitles(main, trans, { mainLang: 'eng', transLang: 'spa' });
+
+  assert.strictEqual(merged[0].mainText, 'Hello');
+  assert.strictEqual(merged[0].transText, 'Hola');
+  assert.strictEqual(merged[0].startMs, 1000);
+  assert.strictEqual(merged[0].endMs, 3000);
+  // The plain fields must be free of the SRT markup that `text` carries.
+  assert.ok(!merged[0].mainText.includes('<b>'));
+  assert.ok(!merged[0].transText.includes('<font'));
+  // ...and `text` must be untouched, so the SRT path is unaffected.
+  assert.ok(merged[0].text.includes('<b>Hello</b>'));
+});
+
+test('mergeSubtitles: transText is null when nothing matched', () => {
+  const main = [{ id: '1', startTime: '00:00:01,000', endTime: '00:00:03,000', text: 'Hello' }];
+  const trans = [{ id: '1', startTime: '00:00:20,000', endTime: '00:00:22,000', text: 'Hola' }];
+  const merged = mergeSubtitles(main, trans, { mainLang: 'eng', transLang: 'spa' });
+  assert.strictEqual(merged[0].transText, null);
+});
+
+test('mergeSubtitles -> formatAss: end-to-end dual styled output', () => {
+  const main = [
+    { id: '1', startTime: '00:00:01,000', endTime: '00:00:03,000', text: 'Buenos días' },
+    { id: '2', startTime: '00:00:04,000', endTime: '00:00:06,000', text: '¿Qué tal?' }
+  ];
+  const trans = [
+    { id: '1', startTime: '00:00:01,000', endTime: '00:00:03,000', text: 'Good morning' },
+    { id: '2', startTime: '00:00:04,000', endTime: '00:00:06,000', text: 'How are you?' }
+  ];
+  const ass = formatAss(mergeSubtitles(main, trans, { mainLang: 'spa', transLang: 'eng' }));
+  const dialogue = ass.split('\n').filter(l => l.startsWith('Dialogue:'));
+  assert.strictEqual(dialogue.length, 2);
+  assert.ok(dialogue[0].includes('Buenos días\\N{\\fs'));
+  assert.ok(dialogue[0].includes('Good morning'));
+  assert.ok(dialogue[1].includes('How are you?'));
+});
+
+// ============================================================================
+// ASS fallback path: what the user sees with "ASS subtitles styling" OFF.
+//
+// `ass2webvtt` below is vendored verbatim from stremio-video
+// (src/withHTMLSubtitles/subtitlesConverter.js). Stremio runs it when the
+// setting is disabled, which is the DEFAULT, so this degradation is the state
+// most viewers start in and is worth pinning.
+// ============================================================================
+
+console.log('\n--- ASS fallback (styling disabled) ---');
+
+function splitASSFields(value, count) {
+  const fields = [];
+  let offset = 0;
+  for (let i = 0; i < count - 1; i++) {
+    const separator = value.indexOf(',', offset);
+    if (separator === -1) return null;
+    fields.push(value.slice(offset, separator));
+    offset = separator + 1;
+  }
+  fields.push(value.slice(offset));
+  return fields;
+}
+
+function convertASSTime(value) {
+  const match = value.trim().match(/^(\d+):(\d{1,2}):(\d{1,2})(?:[.,](\d+))?$/);
+  if (!match) return null;
+  return match[1].padStart(2, '0') + ':' + match[2].padStart(2, '0') + ':' +
+    match[3].padStart(2, '0') + '.' + (match[4] || '0').padEnd(3, '0').slice(0, 3);
+}
+
+function convertASSText(value) {
+  let drawing = false;
+  const text = value.split(/(\{[^}]*\})/).reduce((result, part) => {
+    if (part.startsWith('{') && part.endsWith('}')) {
+      let drawingMode;
+      const drawingPattern = /\\p(\d+)/ig;
+      while ((drawingMode = drawingPattern.exec(part)) !== null) {
+        drawing = parseInt(drawingMode[1], 10) > 0;
+      }
+      return result;
+    }
+    return drawing ? result : result + part;
+  }, '');
+  return text
+    .replace(/\\[Nn]/g, '\n')
+    .replace(/\\h/g, ' ')
+    .replace(/<[a-zA-Z/][^>]*>/g, '')
+    .replace(/&/g, '&amp;')
+    .trim();
+}
+
+function ass2webvtt(data) {
+  const lines = data.replace(/\r+/g, '').split('\n');
+  let inEvents = false;
+  let format = ['layer', 'start', 'end', 'style', 'name', 'marginl', 'marginr', 'marginv', 'effect', 'text'];
+  const cues = [];
+
+  lines.forEach((line) => {
+    const section = line.match(/^\s*\[([^\]]+)\]\s*$/);
+    if (section) {
+      inEvents = section[1].trim().toLowerCase() === 'events';
+      return;
+    }
+    if (!inEvents) return;
+
+    const formatMatch = line.match(/^\s*Format\s*:\s*(.*)$/i);
+    if (formatMatch) {
+      format = formatMatch[1].split(',').map(f => f.trim().toLowerCase());
+      return;
+    }
+
+    const dialogueMatch = line.match(/^\s*Dialogue\s*:\s*(.*)$/i);
+    if (!dialogueMatch) return;
+
+    const fields = splitASSFields(dialogueMatch[1], format.length);
+    const startIndex = format.indexOf('start');
+    const endIndex = format.indexOf('end');
+    const textIndex = format.indexOf('text');
+    if (!fields || startIndex === -1 || endIndex === -1 || textIndex === -1) return;
+
+    const start = convertASSTime(fields[startIndex]);
+    const end = convertASSTime(fields[endIndex]);
+    const text = convertASSText(fields[textIndex]);
+    if (start && end && text) cues.push(start + ' --> ' + end + '\n' + text);
+  });
+
+  if (cues.length === 0) throw new Error('Missing ASS subtitle track cues');
+  return 'WEBVTT\n\n' + cues.join('\n\n') + '\n\n';
+}
+
+test('ASS fallback: Stremio can parse our Events block at all', () => {
+  const vtt = ass2webvtt(formatAss(assCues));
+  assert.ok(vtt.startsWith('WEBVTT'));
+  assert.ok(vtt.includes('00:00:01.500 --> 00:00:04.000'), 'timings survive');
+});
+
+test('ASS fallback: degrades to clean two-line plain text', () => {
+  const vtt = ass2webvtt(formatAss(assCues));
+  const firstCue = vtt.split('\n\n')[1];
+  const [, ...textLines] = firstCue.split('\n');
+  assert.deepStrictEqual(
+    textLines,
+    ['Hola, ¿cómo estás?', 'Hi, how are you?'],
+    'both languages must stay readable, one per line, in order'
+  );
+});
+
+test('ASS fallback: leaves no override-tag or escape artifacts on screen', () => {
+  const vtt = ass2webvtt(formatAss(assCues));
+  const body = vtt.split('\n\n').slice(1).join('\n');
+  assert.ok(!body.includes('\\fs'), 'no font-size tag leaked');
+  assert.ok(!body.includes('&H'), 'no colour literal leaked');
+  assert.ok(!body.includes('\\N'), 'no literal hard-break marker leaked');
+  assert.ok(!/[{}]/.test(body), 'no stray braces');
+});
+
+test('ASS fallback: braced dialogue survives the round trip intact', () => {
+  // This is why escapeAssText maps braces to parentheses instead of escaping
+  // them as `\{`: ass2webvtt matches /\{[^}]*\}/, so `\{dos\}` would have had
+  // "dos" deleted on every client that has ASS styling switched off.
+  const vtt = ass2webvtt(formatAss([
+    { startMs: 1000, endMs: 2000, mainText: 'uno {dos} tres', transText: 'one {two} three' }
+  ]));
+  assert.ok(vtt.includes('uno (dos) tres'), 'braced text must never be eaten');
+  assert.ok(vtt.includes('one (two) three'));
+});
+
+test('ASS fallback: leftover source override tags do not blank a cue', () => {
+  const vtt = ass2webvtt(formatAss([
+    { startMs: 1000, endMs: 2000, mainText: '{\\an8}Arriba', transText: '{\\an8}Up there' }
+  ]));
+  assert.ok(vtt.includes('Arriba'));
+  assert.ok(vtt.includes('Up there'));
+});
+
+// ============================================================================
 // RESULTS
 // ============================================================================
 console.log('\n========================================');
